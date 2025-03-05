@@ -1,21 +1,23 @@
 #!/bin/bash
+set -e  # Exit immediately if any command fails
+set -u  # Treat unset variables as errors
+set -o pipefail # Fail if any command in a pipeline fails
 
-# (Ollama and Python installation parts - same as before)
 # Ensure Ollama is installed (install if needed)
 if ! command -v ollama &> /dev/null; then
   echo "Ollama is not installed. Installing..."
-  curl -fsSL https://ollama.com/install.sh | sh
+  curl -fsSL https://ollama.com/install.sh | sh || { echo "Ollama installation failed." >&2; exit 1; }
 fi
 
 # Ensure Python and pip are installed (install if needed)
 if ! command -v python3 &> /dev/null || ! command -v pip3 &> /dev/null; then
   echo "Python3 or pip3 is not installed. Installing..."
-  sudo apt update
-  sudo apt install -y python3 python3-pip
+  sudo apt update || { echo "Failed to update apt. Exiting." >&2; exit 1; }
+  sudo apt install -y python3 python3-pip || { echo "Failed to install Python. Exiting." >&2; exit 1; }
 fi
 
 # Ensure the ollama and requests python libraries are installed
-pip3 install ollama requests
+pip3 install ollama requests || { echo "Failed to install Python libraries. Exiting." >&2; exit 1; }
 
 # Create the Python script
 cat <<'EOF' > weather_ollama.py
@@ -75,10 +77,16 @@ def create_weather_summary(weather_data):
     return summary.strip()
 
 def run_ollama_model(model_name, messages):
-    """Runs the Ollama model with a list of messages."""
+    """Runs the Ollama model with a list of messages, using streaming."""
     try:
-        response = ollama.chat(model=model_name, messages=messages)
-        return response['message']['content']
+        response_stream = ollama.chat(model=model_name, messages=messages, stream=True)
+        full_response = ""
+        for chunk in response_stream:
+            if 'message' in chunk and 'content' in chunk['message']:
+                print(chunk['message']['content'], end='', flush=True)  # Print as it arrives
+                full_response += chunk['message']['content']
+        print() # Newline after the full response
+        return full_response
     except Exception as e:
         print(f"Ollama error: {e}")
         return None
@@ -105,11 +113,11 @@ def main():
 
         # Initial prompt and response, added to history
         initial_prompt = f"Here is the weather forecast for {city_state}: {weather_summary} What can you tell me about this weather?"
+        print("\nInitial Model Response:\n") # Print this *before* starting the streaming
         initial_response = run_ollama_model(model_name, [{'role': 'user', 'content': initial_prompt}])
 
         if initial_response:
-            print("\nInitial Model Response:\n")
-            print(initial_response)
+            #No need to print again, as it's handled in run_ollama_model now
             conversation_history.append({'role': 'user', 'content': initial_prompt})
             conversation_history.append({'role': 'assistant', 'content': initial_response})
         else:
@@ -130,29 +138,27 @@ def main():
             # Add user input to history
             conversation_history.append({'role': 'user', 'content': prompt})
 
-
-            # Limit history length to avoid exceeding context window. Keep the initial weather prompt.
+            # Limit history length.  Keep the initial prompt and response.
             if len(conversation_history) > 6:  # Adjust as needed
-                conversation_history = [conversation_history[0], conversation_history[1]] + conversation_history[-4:] #Keep first two entries
+                conversation_history = [conversation_history[0], conversation_history[1]] + conversation_history[-4:]
 
-            # Pass the *entire conversation history* to the model
+            print("\nModel Response:\n") # Print this *before* starting the streaming
             response = run_ollama_model(model_name, conversation_history)
 
-
             if response:
-                print("\nModel Response:\n")
-                print(response)
-                conversation_history.append({'role': 'assistant', 'content': response}) #add the response
+                # No need to print the response again, as it's streamed in run_ollama_model.
+                conversation_history.append({'role': 'assistant', 'content': response})  # add the response
             else:
                 print("No response from model.")
 
 if __name__ == "__main__":
     main()
+
 EOF
 
 # Prompt the user for a model and pull it.
 read -p "Enter the Ollama model name to pull (e.g., llama2, mistral, llama3): " model_to_pull
-ollama pull "$model_to_pull"
+ollama pull "$model_to_pull" || { echo "Failed to pull Ollama model." >&2; exit 1; }
 
 # Run the Python script
 python3 weather_ollama.py
